@@ -284,8 +284,8 @@ class ComposerMPTContrastiveLM(HuggingFaceModel):
         p_pooled_outputs = p_pooled_outputs.contiguous() # Why do we need to make this contiguous?
 
         # All Gather is included
-        all_q_pooled_outputs = dist_gather_tensor(q_pooled_outputs)
-        all_p_pooled_outputs = dist_gather_tensor(p_pooled_outputs)
+        all_q_pooled_outputs = q_pooled_outputs
+        all_p_pooled_outputs = p_pooled_outputs
         
         # No All Gather
         #all_q_pooled_outputs = q_pooled_outputs
