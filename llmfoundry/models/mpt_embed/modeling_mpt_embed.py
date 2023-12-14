@@ -321,9 +321,9 @@ class ComposerMPTContrastiveLM(HuggingFaceModel):
         all_scores, all_labels = self.full_contrastive_scores_and_labels(queries=all_q_pooled_outputs, 
                                                                          passages=all_p_pooled_outputs)
         
-        scale = 1 / self.temperature
+        # scale = 1 / self.temperature
         
-        all_scores = all_scores * scale
+        # all_scores = all_scores * scale
         
         # start = dist.get_global_rank() * q_pooled_outputs.shape[0]
         
@@ -346,7 +346,7 @@ class ComposerMPTContrastiveLM(HuggingFaceModel):
         labels = torch.arange(0, passages.shape[0], dtype=torch.long, device=passages.device)
         
         # this calculates the inner product between query and passage pairs
-        qp = torch.mm(queries, passages.t())
+        qp = torch.mm(queries, passages.t()) / 0.01
 
         #print('>> qp shape:', qp.shape)
 
@@ -358,6 +358,8 @@ class ComposerMPTContrastiveLM(HuggingFaceModel):
         scores, labels = self._compute_scores(batch)
                 
         loss = self.loss_fn(scores, labels)
+        
+        loss = loss * dist.get_world_size()
 
         self.labels = labels # JP Added, necessary for train metrics LanguageCrossEntropy
         # Note that LanguageCrossEntropy() calculates loss with respect to logits
