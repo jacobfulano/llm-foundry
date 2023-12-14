@@ -332,7 +332,7 @@ class ComposerMPTContrastiveLM(HuggingFaceModel):
                 
         loss = self.loss_fn(scores, labels)
         
-        loss = loss * dist.get_world_size()
+        # loss = loss * dist.get_world_size()
 
         self.labels = labels # JP Added, necessary for train metrics LanguageCrossEntropy
         # Note that LanguageCrossEntropy() calculates loss with respect to logits
