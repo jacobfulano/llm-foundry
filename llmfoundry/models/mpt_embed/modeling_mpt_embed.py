@@ -485,7 +485,7 @@ class ComposerMPTContrastiveLM(HuggingFaceModel):
         all_q_pooled_outputs = dist_gather_tensor(q_pooled_outputs)
         all_p_pooled_outputs = dist_gather_tensor(p_pooled_outputs)
 
-        distances = self.poincare_distance(q_pooled_outputs, all_p_pooled_outputs)
+        distances = self.poincare_distance(q_pooled_outputs.to(dtype=torch.float64), all_p_pooled_outputs.to(dtype=torch.float64))
         labels = torch.cat([torch.ones(1), torch.zeros(all_p_pooled_outputs.size(0) - 1)])
         labels = labels.to(device=distances.device)
                         #    .repeat(all_q_pooled_outputs.size(0) // p_pooled_outputs.size(0))).to(device=distances.device)
