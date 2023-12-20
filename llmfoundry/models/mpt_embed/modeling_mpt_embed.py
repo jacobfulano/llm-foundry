@@ -455,7 +455,7 @@ class ComposerMPTContrastiveLM(HuggingFaceModel):
         uu = 1. + torch.div(z, ( ( 1 - torch.norm(hyperbolic_queries, 2, 1) ** 2 ) * ( 1 - torch.norm(hyperbolic_passages, 2, 1) ** 2 )))
         # # machine_eps = np.finfo(uu.data.numpy().dtype).eps  # problem with cuda tensor
         # # return acosh(torch.clamp(uu, min=1+machine_eps))
-        score = torch.acosh(uu)
+        score = torch.acosh(uu.clamp(min=1+1e-5))
         
         return score
 
