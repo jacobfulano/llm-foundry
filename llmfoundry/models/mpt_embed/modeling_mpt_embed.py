@@ -92,6 +92,18 @@ def dist_gather_tensor(t: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
     all_tensors = torch.cat(all_tensors, dim=0)
     return all_tensors
 
+class Artanh(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x):
+        x = x.clamp(-1 + 1e-5, 1 - 1e-5)
+        ctx.save_for_backward(x)
+        res = (torch.log_(1 + x).sub_(torch.log_(1 - x))).mul_(0.5)
+        return res
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        (input,) = ctx.saved_tensors
+        return grad_output / (1 - input ** 2)
 
 class ComposerMPTContrastiveLM(HuggingFaceModel):
 
@@ -290,25 +302,16 @@ class ComposerMPTContrastiveLM(HuggingFaceModel):
         q_pooled_outputs = q_pooled_outputs.contiguous() # Why do we need to make this contiguous?
         p_pooled_outputs = p_pooled_outputs.contiguous() # Why do we need to make this contiguous?
 
-        is_distributed = self.config.to_dict().get("is_distributed", True)
+        # All Gather is included
+        all_q_pooled_outputs = dist_gather_tensor(q_pooled_outputs)
+        all_p_pooled_outputs = dist_gather_tensor(p_pooled_outputs)
         
-        # if q_pooled_outputs.shape[0] < p_pooled_outputs.shape[0]:
-        #     q_pooled_outputs = q_pooled_outputs.repeat(p_pooled_outputs.shape[0], 1)
-        
-        if is_distributed:
-            # All Gather is included
-            all_q_pooled_outputs = dist_gather_tensor(q_pooled_outputs)
-            all_p_pooled_outputs = dist_gather_tensor(p_pooled_outputs)
-        else:
-            # No All Gather
-            all_q_pooled_outputs = q_pooled_outputs
-            all_p_pooled_outputs = p_pooled_outputs
+        # No All Gather
+        #all_q_pooled_outputs = q_pooled_outputs
+        #all_p_pooled_outputs = p_pooled_outputs
         
         all_scores, all_labels = self.full_contrastive_scores_and_labels(queries=all_q_pooled_outputs, 
                                                                          passages=all_p_pooled_outputs)
-        
-        all_labels = torch.arange(all_scores.size(0), device=q_pooled_outputs.device, dtype=torch.long)
-        all_labels = all_labels * (p_pooled_outputs.size(0) // q_pooled_outputs.size(0))
         
         scale = 1 / self.temperature
         
@@ -329,6 +332,134 @@ class ComposerMPTContrastiveLM(HuggingFaceModel):
         print('>> mean diagonal scores', all_scores.diagonal().mean())
         return all_scores, all_labels
     
+    def dist(self, x, y, *, c=1.0, keepdim=False):
+        r"""
+        Distance on the Poincare ball
+        .. math::
+            d_c(x, y) = \frac{2}{\sqrt{c}}\tanh^{-1}(\sqrt{c}\|(-x)\oplus_c y\|_2)
+        .. plot:: plots/extended/poincare/distance.py
+        Parameters
+        ----------
+        x : tensor
+            point on poincare ball
+        y : tensor
+            point on poincare ball
+        c : float|tensor
+            ball negative curvature
+        keepdim : bool
+            retain the last dim? (default: false)
+        Returns
+        -------
+        tensor
+            geodesic distance between :math:`x` and :math:`y`
+        """
+        c = torch.as_tensor(c).type_as(x)
+        return self._dist(x, y, c, keepdim=keepdim)
+    
+    def _dist(self,x, y, c, keepdim: bool = False):
+        sqrt_c = c ** 0.5
+        dist_c = self.artanh(sqrt_c * self._mobius_add(-x, y, c).norm(dim=-1, p=2, keepdim=keepdim))
+        return dist_c * 2 / sqrt_c
+    
+    def artanh(self, x):
+        return Artanh.apply(x)
+    
+    def mobius_add(self, x, y, *, c=1.0):
+        r"""
+        Mobius addition is a special operation in a hyperbolic space.
+        .. math::
+            x \oplus_c y = \frac{
+                (1 + 2 c \langle x, y\rangle + c \|y\|^2_2) x + (1 - c \|x\|_2^2) y
+                }{
+                1 + 2 c \langle x, y\rangle + c^2 \|x\|^2_2 \|y\|^2_2
+            }
+        In general this operation is not commutative:
+        .. math::
+            x \oplus_c y \ne y \oplus_c x
+        But in some cases this property holds:
+        * zero vector case
+        .. math::
+            \mathbf{0} \oplus_c x = x \oplus_c \mathbf{0}
+        * zero negative curvature case that is same as Euclidean addition
+        .. math::
+            x \oplus_0 y = y \oplus_0 x
+        Another usefull property is so called left-cancellation law:
+        .. math::
+            (-x) \oplus_c (x \oplus_c y) = y
+        Parameters
+        ----------
+        x : tensor
+            point on the Poincare ball
+        y : tensor
+            point on the Poincare ball
+        c : float|tensor
+            ball negative curvature
+        Returns
+        -------
+        tensor
+            the result of mobius addition
+        """
+        c = torch.as_tensor(c).type_as(x)
+        return self._mobius_add(x, y, c)
+
+
+    def _mobius_add(self, x, y, c):
+        x2 = x.pow(2).sum(dim=-1, keepdim=True)
+        y2 = y.pow(2).sum(dim=-1, keepdim=True)
+        xy = (x * y).sum(dim=-1, keepdim=True)
+        num = (1 + 2 * c * xy + c * y2) * x + (1 - c * x2) * y
+        denom = 1 + 2 * c * xy + c ** 2 * x2 * y2
+        return num / (denom + 1e-5)
+
+    def project(self, x, *, c=1.0):
+        r"""
+        Safe projection on the manifold for numerical stability. This was mentioned in [1]_
+        Parameters
+        ----------
+        x : tensor
+            point on the Poincare ball
+        c : float|tensor
+            ball negative curvature
+        Returns
+        -------
+        tensor
+            projected vector on the manifold
+        References
+        ----------
+        .. [1] Hyperbolic Neural Networks, NIPS2018
+            https://arxiv.org/abs/1805.09112
+        """
+        c = torch.as_tensor(c).type_as(x).to(x.device)
+        return self._project(x, c)
+
+    def _project(self, x, c):
+        norm = torch.clamp_min(x.norm(dim=-1, keepdim=True, p=2), 1e-5)
+        maxnorm = (1 - 1e-3) / (c ** 0.5)
+        cond = norm > maxnorm
+        projected = x / norm * maxnorm
+        return torch.where(cond, projected, x)
+
+    def poincare_distance(self, queries: torch.Tensor, passages: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+         # the labels 
+        
+        # this calculates the inner product between query and passage pairs
+        # qp = torch.mm(queries, passages.t())
+        # numerator = F.normalize(queries - passages, dim=-1) ** 2
+        # denominator = (1 - queries ** 2) * (1 - passages ** 2)
+        # qp = torch.acosh(1 + 2 * numerator / denominator)
+        # Note: from https://github.com/HazyResearch/hyperbolics/blob/master/pytorch/hyperbolic_models.py#L52
+        hyperbolic_queries = self.project(queries)
+        hyperbolic_passages = self.project(passages)
+        
+        z  = 2 * (torch.norm( hyperbolic_queries - hyperbolic_passages, 2, 1)**2)
+        uu = 1. + torch.div(z, ( ( 1 - torch.norm(hyperbolic_queries, 2, 1) ** 2 ) * ( 1 - torch.norm(hyperbolic_passages, 2, 1) ** 2 )))
+        # # machine_eps = np.finfo(uu.data.numpy().dtype).eps  # problem with cuda tensor
+        # # return acosh(torch.clamp(uu, min=1+machine_eps))
+        score = torch.acosh(uu)
+        
+        return score
+
+    
     def full_contrastive_scores_and_labels(self, queries: torch.Tensor, passages: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
 
         # the labels 
@@ -340,13 +471,35 @@ class ComposerMPTContrastiveLM(HuggingFaceModel):
         #print('>> qp shape:', qp.shape)
 
         return qp, labels
+    
+    def poincare_contrastive_loss(self, batch, outputs, margin=1.0):
+        (queries_batch, queries_last_hidden_state) = self.format_queries_batch(batch, outputs.hidden_states)
+        (passages_batch, passages_last_hidden_state) = self.format_passages_batch(batch, outputs.hidden_states)
+        
+        q_last_hidden = queries_last_hidden_state.masked_fill(~queries_batch.get('attention_mask', None)[..., None].bool(), 0.0)
+        q_pooled_outputs = q_last_hidden.sum(dim=1) / queries_batch.get('attention_mask', None).sum(dim=1)[..., None]
+        
+        p_last_hidden = passages_last_hidden_state.masked_fill(~passages_batch.get('attention_mask', None)[..., None].bool(), 0.0)
+        p_pooled_outputs = p_last_hidden.sum(dim=1) / passages_batch.get('attention_mask', None).sum(dim=1)[..., None]
+        
+        all_q_pooled_outputs = dist_gather_tensor(q_pooled_outputs)
+        all_p_pooled_outputs = dist_gather_tensor(p_pooled_outputs)
+
+        distances = self.poincare_distance(q_pooled_outputs, all_p_pooled_outputs)
+        labels = torch.cat([torch.ones(1), torch.zeros(all_p_pooled_outputs.size(0) - 1)])
+        labels = labels.to(device=distances.device)
+                        #    .repeat(all_q_pooled_outputs.size(0) // p_pooled_outputs.size(0))).to(device=distances.device)
+        losses = labels * distances.pow(2) + (1 - labels) * F.relu(margin - distances).pow(2)
+        return losses.mean(), labels
+        # return distances
 
     def loss(self, outputs: CausalLMOutputWithPast,
              batch: Mapping) -> torch.Tensor:
         
-        scores, labels = self._compute_scores(batch, outputs)
+        loss, labels = self.poincare_contrastive_loss(batch, outputs)
+        # scores, labels = self._compute_scores(batch, outputs)
                 
-        loss = self.loss_fn(scores, labels)
+        # loss = self.loss_fn(scores.unsqueeze(0), labels)
 
         self.labels = labels # JP Added, necessary for train metrics LanguageCrossEntropy
         # Note that LanguageCrossEntropy() calculates loss with respect to logits
