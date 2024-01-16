@@ -637,9 +637,9 @@ def main(cfg: DictConfig) -> Trainer:
         trainer.eval()
 
     print('Starting training...')
-    print('model.n_active_params ',model.n_active_params)
-    print('model_config.tie_word_embeddings ',model_config.tie_word_embeddings)
-    print('model_config.vocab_size ',model_config.vocab_size)
+    print('model.n_active_params ', model.n_active_params)
+    print('model_config.tie_word_embeddings ', model_config.get('tie_word_embeddings', 'Not Found'))
+    print('model_config.vocab_size', model_config.get('tie_word_embeddings', 'Not Found'))
     trainer.fit() # reset_time=True,duration=max_duration) # JP Added
 
     print('Done.')

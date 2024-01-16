@@ -23,7 +23,7 @@ from composer.metrics import (InContextLearningCodeEvalAccuracy,
                               LossMetric) # JP Added
 from composer.metrics.nlp import LanguageCrossEntropy, LanguagePerplexity
 from composer.models import HuggingFaceModel
-from composer.utils import dist
+from composer.utils import dist, get_device
 from omegaconf import DictConfig
 from omegaconf import OmegaConf as om
 from transformers import PreTrainedModel, PreTrainedTokenizerBase
@@ -69,7 +69,8 @@ except:
 import logging
 
 # JP: imports from mpt/modeling_mpt
-from llmfoundry.models.mpt.modeling_mpt import MPTPreTrainedModel, MPTModel, MPTForCausalLM, ComposerMPTCausalLM
+from llmfoundry.models.mpt.modeling_mpt import MPTPreTrainedModel, MPTModel, MPTForCausalLM
+from llmfoundry.models.hf.hf_causal_lm import ComposerHFCausalLM
 
 log = logging.getLogger(__name__)
 
@@ -117,8 +118,13 @@ class ComposerMPTContrastiveLM(HuggingFaceModel):
     ):
         resolved_om_model_config = om.to_container(om_model_config,
                                                    resolve=True)
-        hf_config = MPTConfig.from_dict(resolved_om_model_config)
-        model = MPTForCausalLM(hf_config)
+        if resolved_om_model_config.get('pretrained_model_name_or_path', None):
+            model = ComposerHFCausalLM(om.create(resolved_om_model_config), tokenizer)
+            model = model.model # ComposerHFCausalLM will cause a nesting one too deep, we just use the underlying *CausalLM class from HF
+            self.is_mpt = False
+        else:
+            model = MPTForCausalLM(MPTConfig.from_dict(resolved_om_model_config))
+            self.is_mpt = True
 
         use_train_metrics = om_model_config.get('use_train_metrics', True)
         
@@ -154,9 +160,6 @@ class ComposerMPTContrastiveLM(HuggingFaceModel):
         # Temperature for InfoNCELoss
         self.temperature = resolved_om_model_config.get('temperature', 1)
         
-        step_size = self.config.to_dict().get("pos_step_size", 2)
-        self.pattern = torch.arange(1, step_size, device=model.device)
-
         self.n_active_params = sum(p.numel() for p in self.parameters())
 
         loss_fn_config = om_model_config.get('loss_fn', 'fused_crossentropy')
@@ -207,7 +210,7 @@ class ComposerMPTContrastiveLM(HuggingFaceModel):
         return passages, last_hidden_state[index, :, :]
 
     def forward(self, batch: MutableMapping) -> CausalLMOutputWithPast:
-        if self.model.transformer.prefix_lm:
+        if self.is_mpt and self.model.transformer.prefix_lm:
             add_bidirectional_mask_if_missing(batch)
         # Note: prefix_mask is only used if model.prefix_lm is True
 
@@ -237,14 +240,21 @@ class ComposerMPTContrastiveLM(HuggingFaceModel):
         if 'labels' in batch:
             reshaped_labels = batch['labels'].reshape((dim1*dim2,dim3))
             batch['labels'] = reshaped_labels
+            
+        kwargs = {
+            "input_ids": batch['input_ids'],
+            "attention_mask": batch.get('attention_mask', None),
+            "inputs_embeds": batch.get('inputs_embeds', None),
+        }
+        
+        if self.is_mpt:
+            kwargs = {
+                **kwargs,
+                "sequence_id": batch.get('sequence_id', None),
+                "prefix_mask": batch.get('prefix_mask', None),
+            }
 
-        return self.model(
-            input_ids=batch['input_ids'],
-            attention_mask=batch.get('attention_mask', None),
-            prefix_mask=batch.get('prefix_mask', None),
-            sequence_id=batch.get('sequence_id', None),
-            inputs_embeds=batch.get('inputs_embeds', None),
-        )
+        return self.model(**kwargs)
     
     def _compute_scores(self, batch, outputs) -> Tuple:
 
