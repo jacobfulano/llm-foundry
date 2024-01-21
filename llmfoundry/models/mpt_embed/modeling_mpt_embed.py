@@ -128,6 +128,8 @@ class ComposerMPTContrastiveLM(HuggingFaceModel):
 
         use_train_metrics = om_model_config.get('use_train_metrics', True)
         
+        self.model_config = resolved_om_model_config
+        
         # train_metrics = [LanguageCrossEntropy(),
         #                  LanguagePerplexity()] if use_train_metrics else []
 
@@ -189,7 +191,7 @@ class ComposerMPTContrastiveLM(HuggingFaceModel):
         JP: Note that there could be a better way to do this
         """
         queries = {}
-        step_size = self.config.to_dict().get("pos_step_size", 2)
+        step_size = self.model_config.get("pos_step_size", 2)
         for key in batch.keys():
             queries[key] = batch[key][0::step_size, :] # no need to reshape.reshape(batch[key].size(0), -1)
             
@@ -198,7 +200,7 @@ class ComposerMPTContrastiveLM(HuggingFaceModel):
     def format_passages_batch(self, batch, last_hidden_state):
         """ Format `passages` by selecting every other pair from the batch """
         passages = {}
-        step_size = self.config.to_dict().get("pos_step_size", 2)
+        step_size = self.model_config.get("pos_step_size", 2)
 
         # Index on a variable step size
         for key in batch.keys():
@@ -253,6 +255,11 @@ class ComposerMPTContrastiveLM(HuggingFaceModel):
                 "sequence_id": batch.get('sequence_id', None),
                 "prefix_mask": batch.get('prefix_mask', None),
             }
+        else:
+            kwargs = {
+                **kwargs,
+                "output_hidden_states": True
+            }
 
         return self.model(**kwargs)
     
@@ -268,7 +275,10 @@ class ComposerMPTContrastiveLM(HuggingFaceModel):
         BERT formula to keep track of sentences A and sentences B in the next sentence prediction objective
         function. For now we split even and odd rows
         """
-        (queries_batch, queries_last_hidden_state) = self.format_queries_batch(batch, outputs.hidden_states)
+        if type(outputs.hidden_states) is tuple:
+            outputs.hidden_states = list(outputs.hidden_states)[-1]
+        
+        (queries_batch, queries_last_hidden_state) = self.format_queries_batch(batch, outputs.hidden_states) # hidden_states can be a tuple when using HF
         (passages_batch, passages_last_hidden_state) = self.format_passages_batch(batch, outputs.hidden_states)
         
         
